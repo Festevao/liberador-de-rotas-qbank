@@ -3,17 +3,10 @@
 import { useMemo, useState } from "react";
 import { ApiError, dbFetch, useDb } from "@/components/db-context";
 import { fieldClass, labelClass } from "@/components/field";
+import { PathField } from "@/components/path-field";
 import { SearchSelect } from "@/components/search-select";
 import { useDebouncedValue } from "@/hooks/use-debounced-value";
-import {
-  PRESETS,
-  PRESET_IDS,
-  buildStoredPath,
-  defaultObservacao,
-  parseBulk,
-  sampleConcretePath,
-  type PresetId,
-} from "@/lib/regex";
+import { composePath, type PathUnit } from "@/lib/path-editor";
 import { copyInsertSql, copyKnexMigration } from "@/lib/sql";
 import {
   APPLICATIONS,
@@ -22,15 +15,22 @@ import {
   type LiberarResponse,
 } from "@/lib/types";
 
-interface ReadyRoute {
-  line: number;
+interface RouteRow {
+  id: string;
   method: string;
-  expressPath: string;
+  units: PathUnit[];
+  caret: number;
   observacao: string;
-  params: { name: string; preset: PresetId }[];
+}
+
+interface ReadyRoute {
+  id: string;
+  method: string;
+  observacao: string;
   storedPath: string;
   samplePath: string;
   error?: string;
+  truncated: boolean;
 }
 
 export function ReleaseScreen() {
@@ -40,9 +40,8 @@ export function ReleaseScreen() {
   const debouncedProfileSearch = useDebouncedValue(profileSearch);
   const [scopeId, setScopeId] = useState("");
   const [applicationId, setApplicationId] = useState("1");
-  const [text, setText] = useState("GET /v3/qbank/:qbankId/reset | Reinicia o simulado");
-  const [overrides, setOverrides] = useState<Record<string, PresetId>>({});
-  const [bulkPreset, setBulkPreset] = useState<PresetId>("numeric");
+  const [rows, setRows] = useState<RouteRow[]>(() => [emptyRow()]);
+  const [activeRowId, setActiveRowId] = useState<string | null>(null);
   const [testMethod, setTestMethod] = useState("GET");
   const [testPath, setTestPath] = useState("");
   const [matches, setMatches] = useState<Collision[] | null>(null);
@@ -53,7 +52,7 @@ export function ReleaseScreen() {
   const [pending, setPending] = useState(false);
   const [copied, setCopied] = useState("");
 
-  const routes = useMemo(() => buildRoutes(text, overrides), [text, overrides]);
+  const routes = useMemo(() => rows.map(describeRow), [rows]);
   const validRoutes = routes.filter((route) => !route.error);
   const visiblePerfis = perfis.filter((perfil) => {
     const term = debouncedProfileSearch.trim().toLowerCase();
@@ -67,14 +66,23 @@ export function ReleaseScreen() {
     );
   }
 
-  function applyPresetToAll() {
-    const next: Record<string, PresetId> = {};
-    for (const route of routes) {
-      route.params.forEach((param, index) => {
-        next[overrideKey(route.line, index, param.name)] = bulkPreset;
-      });
-    }
-    setOverrides(next);
+  function updateRow(id: string, patch: Partial<RouteRow>) {
+    setRows((current) => current.map((row) => (row.id === id ? { ...row, ...patch } : row)));
+  }
+
+  function addRow(afterId: string) {
+    const source = rows.find((row) => row.id === afterId);
+    const next = emptyRow(source?.method ?? "GET");
+    setRows((current) => {
+      const index = current.findIndex((row) => row.id === afterId);
+      if (index < 0) return [...current, next];
+      return [...current.slice(0, index + 1), next, ...current.slice(index + 1)];
+    });
+    setActiveRowId(next.id);
+  }
+
+  function removeRow(id: string) {
+    setRows((current) => (current.length === 1 ? current : current.filter((row) => row.id !== id)));
   }
 
   async function testUrl() {
@@ -216,79 +224,79 @@ export function ReleaseScreen() {
         </div>
       </div>
 
-      <label className="block">
-        <span className={labelClass}>Rotas, uma por linha</span>
-        <textarea
-          className={`${fieldClass} h-40 py-2 font-mono text-xs`}
-          value={text}
-          onChange={(event) => setText(event.target.value)}
-          spellCheck={false}
-        />
-      </label>
-      <p className="text-xs text-[var(--muted)]">
-        Formato: <span className="font-mono">GET /v3/foo/:id | observação</span>. Linhas com # são ignoradas.
-      </p>
-      <div className="flex flex-wrap items-end gap-2">
-        <label>
-          <span className={labelClass}>Preset para todos os parâmetros</span>
-          <select
-            className={fieldClass}
-            value={bulkPreset}
-            onChange={(event) => setBulkPreset(event.target.value as PresetId)}
-          >
-            {PRESET_IDS.map((id) => (
-              <option key={id} value={id}>
-                {PRESETS[id].label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <button type="button" className="h-10 rounded-md border border-[var(--line)] bg-white px-3 text-sm" onClick={applyPresetToAll}>
-          Aplicar em todos
-        </button>
-      </div>
-
-      <div className="space-y-3">
-        {routes.map((route) => (
-          <article key={route.line} className="rounded-lg border border-[var(--line)] bg-[var(--panel)] p-3">
-            <p className="text-sm">
-              <span className="font-mono">L{route.line}</span>{" "}
-              <span className="font-mono font-medium">{route.method || "—"}</span> {route.expressPath}
-            </p>
-            {route.error ? <p className="mt-2 text-sm text-[var(--danger)]">{route.error}</p> : null}
-            {route.params.length > 0 ? (
-              <div className="mt-2 flex flex-wrap gap-2">
-                {route.params.map((param, index) => (
-                  <label key={`${param.name}-${index}`} className="text-xs">
-                    <span className="mb-1 block font-mono">:{param.name}</span>
-                    <select
-                      className="h-8 rounded-md border border-[var(--line)] bg-white px-2"
-                      value={param.preset}
-                      onChange={(event) =>
-                        setOverrides((current) => ({
-                          ...current,
-                          [overrideKey(route.line, index, param.name)]: event.target.value as PresetId,
-                        }))
-                      }
-                    >
-                      {PRESET_IDS.map((id) => (
-                        <option key={id} value={id}>
-                          {PRESETS[id].label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                ))}
+      <div className="space-y-4">
+        <p className="text-xs leading-5 text-[var(--muted)]">
+          O que você digita no path é literal. MongoId, numérico e o regex próprio entram como um bloco:
+          Backspace e Delete apagam o bloco inteiro, sem editar por dentro.
+        </p>
+        {rows.map((row) => {
+          const route = routes.find((item) => item.id === row.id);
+          return (
+            <div key={row.id} className="grid items-start gap-2 md:grid-cols-[8rem_minmax(0,1.5fr)_minmax(0,1fr)_auto]">
+              <label>
+                <span className={labelClass}>Método</span>
+                <select
+                  className={fieldClass}
+                  value={row.method}
+                  aria-label="Método HTTP"
+                  onChange={(event) => updateRow(row.id, { method: event.target.value })}
+                >
+                  {METHODS.map((item) => (
+                    <option key={item} value={item}>
+                      {item}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div>
+                <span className={labelClass}>Path</span>
+                <PathField
+                  units={row.units}
+                  caret={row.caret}
+                  active={activeRowId === row.id}
+                  error={row.units.length > 0 ? route?.error : undefined}
+                  storedPath={route?.storedPath}
+                  onFocus={() => setActiveRowId(row.id)}
+                  onChange={(units, caret) => updateRow(row.id, { units, caret })}
+                />
               </div>
-            ) : null}
-            {!route.error ? (
-              <p className="mt-2 font-mono text-xs break-all text-[var(--accent)]">{route.storedPath}</p>
-            ) : null}
-            {!route.error && route.observacao.length >= 100 ? (
-              <p className="mt-1 text-xs text-[var(--warn)]">Observação cortada em 100 caracteres.</p>
-            ) : null}
-          </article>
-        ))}
+              <label>
+                <span className={labelClass}>Observação</span>
+                <input
+                  className={fieldClass}
+                  value={row.observacao}
+                  maxLength={100}
+                  placeholder="Se vazio, usa o path"
+                  aria-label="Observação da rota"
+                  onChange={(event) => updateRow(row.id, { observacao: event.target.value })}
+                />
+                {route?.truncated ? (
+                  <p className="mt-1 text-xs text-[var(--warn)]">Observação cortada em 100 caracteres.</p>
+                ) : null}
+              </label>
+              <div className="flex gap-1 md:pt-5">
+                {rows.length > 1 ? (
+                  <button
+                    type="button"
+                    aria-label="Remover rota"
+                    className="h-10 w-10 rounded-md border border-[var(--line)] bg-white text-lg"
+                    onClick={() => removeRow(row.id)}
+                  >
+                    ×
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  aria-label="Adicionar rota"
+                  className="h-10 w-10 rounded-md border border-[var(--line)] bg-white text-lg"
+                  onClick={() => addRow(row.id)}
+                >
+                  +
+                </button>
+              </div>
+            </div>
+          );
+        })}
       </div>
 
       <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] p-3">
@@ -404,27 +412,22 @@ export function ReleaseScreen() {
   );
 }
 
-function buildRoutes(text: string, overrides: Record<string, PresetId>): ReadyRoute[] {
-  return parseBulk(text).map((line) => {
-    const params = line.params.map((param, index) => ({
-      name: param.name,
-      preset: overrides[overrideKey(line.line, index, param.name)] ?? "objectId",
-    }));
-    const presets = params.map((param) => param.preset);
-    const observacao = (line.observacao || defaultObservacao(line.expressPath)).slice(0, 100);
-    return {
-      line: line.line,
-      method: line.method,
-      expressPath: line.expressPath,
-      observacao,
-      params,
-      storedPath: line.error ? "" : buildStoredPath(line.expressPath, presets),
-      samplePath: line.error ? "" : sampleConcretePath(line.expressPath, presets),
-      error: line.error,
-    };
-  });
+function emptyRow(method = "GET"): RouteRow {
+  return { id: crypto.randomUUID(), method, units: [], caret: 0, observacao: "" };
 }
 
-function overrideKey(line: number, index: number, name: string): string {
-  return `${line}:${index}:${name}`;
+function describeRow(row: RouteRow): ReadyRoute {
+  const composed = composePath(row.units);
+  const typed = row.observacao.trim();
+  const source = typed || composed.visible;
+  const observacao = source.slice(0, 100);
+  return {
+    id: row.id,
+    method: row.method,
+    observacao,
+    storedPath: composed.storedPath,
+    samplePath: composed.samplePath,
+    error: composed.error,
+    truncated: source.length > 100,
+  };
 }

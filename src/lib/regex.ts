@@ -1,5 +1,5 @@
 export const PRESETS = {
-  objectId: { label: "ObjectId", pattern: "[a-fA-F0-9]{24}" },
+  objectId: { label: "MongoId", pattern: "[a-fA-F0-9]{24}" },
   numeric: { label: "Numérico", pattern: "[0-9]{1,20}" },
   numericOpen: { label: "Numérico aberto", pattern: "[0-9]{1,}" },
   alnum: { label: "Alfanumérico", pattern: "[A-Za-z0-9]{1,100}" },
@@ -142,6 +142,12 @@ function validateParams(path: string): string | undefined {
     }
   }
   return undefined;
+}
+
+export function sampleForPattern(pattern: string): string {
+  const preset = PRESET_IDS.find((id) => PRESETS[id].pattern === pattern);
+  if (!preset) return "x";
+  return sampleForPreset(preset);
 }
 
 function sampleForPreset(preset: PresetId): string {
